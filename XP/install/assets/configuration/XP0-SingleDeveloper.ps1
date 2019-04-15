@@ -1,166 +1,88 @@
-#Requires -Modules WebAdministration
+# The Prefix that will be used on SOLR, Website and Database instances.
+$Prefix = "sc910"
+# The Password for the Sitecore Admin User. This will be regenerated if left on the default.
+$SitecoreAdminPassword = "SIF-Default"
+# The root folder with the license file and WDP files.
+$SCInstallRoot = "C:\ResourceFiles"
+# The name for the XConnect service.
+$XConnectSiteName = "$prefix.xconnect"
+# The Sitecore site instance name.
+$SitecoreSiteName = "$prefix.sc"
+# Identity Server site name
+$IdentityServerSiteName = "$prefix.identityserver"
+# The Path to the license file
+$LicenseFile = "$SCInstallRoot\license.xml"
+# The URL of the Solr Server
+$SolrUrl = "https://localhost:8983/solr"
+# The Folder that Solr has been installed to.
+$SolrRoot = "C:\Solr-7.2.1"
+# The Name of the Solr Service.
+$SolrService = "Solr-7.2.1"
+# The DNS name or IP of the SQL Instance.
+$SqlServer = "localhost"
+# A SQL user with sysadmin privileges.
+$SqlAdminUser = "sa"
+# The password for $SQLAdminUser.
+$SqlAdminPassword = "Password123"
+# The path to the XConnect Package to Deploy.
+$XConnectPackage = (Get-ChildItem "$SCInstallRoot\Sitecore 9.1.0 rev. * (OnPrem)_xp0xconnect.scwdp.zip").FullName
+# The path to the Sitecore Package to Deploy.
+$SitecorePackage = (Get-ChildItem "$SCInstallRoot\Sitecore 9.1.0 rev. * (OnPrem)_single.scwdp.zip").FullName
+# The path to the Identity Server Package to Deploy.
+$IdentityServerPackage = (Get-ChildItem "$SCInstallRoot\Sitecore.IdentityServer 2.0.0 rev. * (OnPrem)_identityserver.scwdp.zip").FullName
+# The Identity Server password recovery URL, this should be the URL of the CM Instance
+$PasswordRecoveryUrl = "http://$SitecoreSiteName"
+# The URL of the Identity Server
+$SitecoreIdentityAuthority = "https://$IdentityServerSiteName"
+# The URL of the XconnectService
+$XConnectCollectionService = "https://$XConnectSiteName"
+# The random string key used for establishing connection with IdentityService. This will be regenerated if left on the default.
+$ClientSecret = "SIF-Default"
+# Pipe-separated list of instances (URIs) that are allowed to login via Sitecore Identity.
+$AllowedCorsOrigins = "http://$SitecoreSiteName"
 
-#Set-StrictMode -Version 2.0
 
-Function Invoke-ManageCommerceServiceTask {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('Remove-Website', 'Remove-WebAppPool', 'Remove-Item')]
-        [string]$Action,
-        [Parameter(Mandatory = $false)]
-        [string]$PhysicalPath,
-        [Parameter(Mandatory = $false)]
-        [string]$AppPoolName = $Name,
-        [Parameter(Mandatory = $false)]
-        [string]$Port,
-        [Parameter(Mandatory = $false)]
-        [System.Security.Cryptography.X509Certificates.X509Certificate2] $Signer
-    )
-
-    Write-Information -MessageData "Manage Commerce Service $Name, Action $Action" -InformationAction 'Continue'
-
-    try {
-        if ($PSCmdlet.ShouldProcess($Name, $Action)) {
-            switch ($Action) {
-                'Remove-Website' {
-                    if (Get-Website($Name)) {
-                        Write-Host "Removing Website '$Name'"
-                        Remove-Website -Name $Name
-                    }
-                }
-                'Remove-WebAppPool' {
-                    if (Test-Path "IIS:\AppPools\$Name") {
-                        if ((Get-WebAppPoolState $Name).Value -eq "Started") {
-                            Write-Host "Stopping '$Name' application pool"
-                            Stop-WebAppPool -Name $Name
-                        }
-                        Write-Host "Removing '$Name' application pool"
-                        Remove-WebAppPool -Name $Name
-                    }
-                }
-                'Remove-Item' {
-                    if (Test-Path $PhysicalPath) {
-                        Write-Host "Attempting to delete site directory '$PhysicalPath'"
-                        Remove-Item $PhysicalPath -Recurse -Force
-                        Write-Host "'$PhysicalPath' deleted" -ForegroundColor Green
-                        dev_reset_iis_sql
-                    }
-                    else {
-                        Write-Warning "'$PhysicalPath' does not exist, no need to delete"
-                    }
-                }
-            }
-        }
-    }
-    catch {
-        Write-Error $_
-    }
+# Install XP0 via combined partials file.
+$singleDeveloperParams = @{
+    Path = "$SCInstallRoot\XP0-SingleDeveloper.json"
+    SqlServer = $SqlServer
+    SqlAdminUser = $SqlAdminUser
+    SqlAdminPassword = $SqlAdminPassword
+    SitecoreAdminPassword = $SitecoreAdminPassword
+    SolrUrl = $SolrUrl
+    SolrRoot = $SolrRoot
+    SolrService = $SolrService
+    Prefix = $Prefix
+    XConnectCertificateName = $XConnectSiteName
+    IdentityServerCertificateName = $IdentityServerSiteName
+    IdentityServerSiteName = $IdentityServerSiteName
+    LicenseFile = $LicenseFile
+    XConnectPackage = $XConnectPackage
+    SitecorePackage = $SitecorePackage
+    IdentityServerPackage = $IdentityServerPackage
+    XConnectSiteName = $XConnectSiteName
+    SitecoreSitename = $SitecoreSiteName
+    PasswordRecoveryUrl = $PasswordRecoveryUrl
+    SitecoreIdentityAuthority = $SitecoreIdentityAuthority
+    XConnectCollectionService = $XConnectCollectionService
+    ClientSecret = $ClientSecret
+    AllowedCorsOrigins = $AllowedCorsOrigins
 }
 
-Function Invoke-UpdateIdentityServerThumbprintTask {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Thumbprint,
-        [Parameter(Mandatory = $true)]
-        [string]$IDServerPath
-    )
+Push-Location $SCInstallRoot
 
-    Write-Host "Updating thumbprint in config file"
-    $pathToJson = $(Join-Path -Path $IDServerPath -ChildPath "wwwroot\appsettings.json")
-    $originalJson = Get-Content $pathToJson -Raw | ConvertFrom-Json
-    $settingsNode = $originalJson.AppSettings
-    $settingsNode.IDServerCertificateThumbprint = $thumbprint
-    $originalJson | ConvertTo-Json -Depth 100 -Compress | set-content $pathToJson
-}
+Install-SitecoreConfiguration @singleDeveloperParams *>&1 | Tee-Object XP0-SingleDeveloper.log
 
-function Invoke-SetPermissionsTask {
-    [CmdletBinding(SupportsShouldProcess=$true)]
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateScript({Test-Path $_ })]
-        [string]$Path,
-        [psobject[]]$Rights
-    )
+# Uncomment the below line and comment out the above if you want to remove the XP0 SingleDeveloper Config
+#Uninstall-SitecoreConfiguration @singleDeveloperParams *>&1 | Tee-Object XP0-SingleDeveloper-Uninstall.log
 
-    <#
-        Rights should contains
-        @{
-            User
-            FileSystemRights
-            AccessControlType
+Pop-Location
 
-            InheritanceFlags
-            PropagationFlags
-        }
-    #>
-
-    if(!$WhatIfPreference) {
-        Get-Acl -Path $Path | Set-Acl -Path $Path
-    }
-
-    $acl = Get-Acl -Path $Path
-
-    foreach($entry in $Rights){
-        $user = $entry.User
-        $permissions = $entry.FileSystemRights
-        $control = 'Allow'
-        if($entry['AccessControlType']) { $control = $entry.AccessControlType }
-        $inherit = 'ContainerInherit','ObjectInherit'
-        if($entry['InheritanceFlags']) { $inherit = $entry.InheritanceFlags }
-        $prop = 'None'
-        if($entry['PropagationFlags']) { $prop = $entry.PropagationFlags }
-
-        Write-Information -MessageData "Set Permissions $permissions for $user to path $path, $control" -InformationAction 'Continue'
-
-        if($PSCmdlet.ShouldProcess($Path, "Setting permissions")) {
-            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, $permissions, $inherit, $prop, $control)
-            $acl.SetAccessRule($rule)
-
-            Write-Verbose "$control '$permissions' for user '$user' on '$path'"
-            Write-Verbose "Permission inheritance: $inherit"
-            Write-Verbose "Propagation: $prop"
-            Set-Acl -Path $Path -AclObject $acl
-            Write-Verbose "Permissions set"
-        }
-    }
-}
-
-Register-SitecoreInstallExtension -Command Invoke-ManageCommerceServiceTask -As ManageCommerceService -Type Task -Force
-Register-SitecoreInstallExtension -Command Invoke-UpdateIdentityServerThumbprintTask -As UpdateIdentityServerThumbprint -Type Task -Force
-Register-SitecoreInstallExtension -Command Invoke-SetPermissionsTask -As SetPermissions -Type Task -Force
-
-function dev_reset_iis_sql {
-    try {
-        Write-Host "Restarting IIS"
-        iisreset -stop
-        iisreset -start
-    }
-    catch {
-        Write-Host "Something went wrong restarting IIS again"
-        iisreset -stop
-        iisreset -start
-    }
-
-    $mssqlService = Get-Service *SQL* | Where-Object {$_.Status -eq 'Running' -and $_.DisplayName -like 'SQL Server (*'} | Select-Object -First 1 -ExpandProperty Name
-
-    try {
-        Write-Host "Restarting SQL Server"
-        restart-service -force $mssqlService
-    }
-    catch {
-        Write-Host "Something went wrong restarting SQL server again"
-        restart-service -force $mssqlService
-    }
-}
 # SIG # Begin signature block
 # MIIXwQYJKoZIhvcNAQcCoIIXsjCCF64CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUlMc8GeoRNe8F2uMMleAku2E3
-# yVCgghL8MIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQU0hbI28mrLmTNnoCGQXEwEmuF
+# TGKgghL8MIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
 # AQUFADCBizELMAkGA1UEBhMCWkExFTATBgNVBAgTDFdlc3Rlcm4gQ2FwZTEUMBIG
 # A1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEdMBsGA1UECxMUVGhh
 # d3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBpbmcg
@@ -266,22 +188,22 @@ function dev_reset_iis_sql {
 # bTExMC8GA1UEAxMoRGlnaUNlcnQgU0hBMiBBc3N1cmVkIElEIENvZGUgU2lnbmlu
 # ZyBDQQIQB6Zc7QsNL9EyTYMCYZHvVTAJBgUrDgMCGgUAoHAwEAYKKwYBBAGCNwIB
 # DDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEO
-# MAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFKTUtO1KWb4ghh2uWArqv2QG
-# ek9NMA0GCSqGSIb3DQEBAQUABIIBALL/t+VHavuAL4tWALU/htHH5HVbzFof0gGY
-# 2vP8IZv7rWKVSanL5AxcUyMBtZbL4182Cc7Y45BsC7eLsupo+YNJ8WEHsBJahQ38
-# 1udKxCw/Z6Xbn/kpyymk01lWaSvrChiD2xZpJ8eAnN/3bzc4Cy1lU7aISyVvhFBQ
-# oaXg619EoR4Ugmzj3Q3MaU4cShqG5nyjGl1d30XXMnRBZprd/JxDZUEMppQI/2s9
-# 54GJ+xONmi10R5XTqR8AXF6rnIRyAX5qcBeZ9Mlhv5FbLmFwJsU4lZSj61SlVJ2N
-# k9TLt7M3nEjfgPBk/2BXWUZ4O2ktxNbTAw1WFbaigXqPxg+kLUWhggILMIICBwYJ
+# MAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFF2Jz0MItfAfjspxaMyGbLkJ
+# X3chMA0GCSqGSIb3DQEBAQUABIIBAE9ns0RYqxgafZ5um5c3EfvpdpyAzpmSDYWo
+# hSCHklCiR17ehkp3zunZra/hg/idFvxtjRyqKWLMSiODNL38e1P/MYsjvzmj5PtB
+# EguTNDMi9OsyruvCb0BaJO6eAZ6455KX8KjcUfZdlysxocGlD/hdCVt3XMCMrbjk
+# qR7rb7g20WcwK6R0t+Mbv4QzOZyi6ebGrRqZNC0ZkILSLe4ZWamKV9NInQB0ttMt
+# JAgjju5NKS7TnMM8chBGqASqfG7/pDGDvmL4fNpThW3Et/MYTWZOCgw+i9JfnKC1
+# ByR277G1pQSQmD74W8YAU174MSgMgfT1PkH0YuiL5tsLWtBQWlmhggILMIICBwYJ
 # KoZIhvcNAQkGMYIB+DCCAfQCAQEwcjBeMQswCQYDVQQGEwJVUzEdMBsGA1UEChMU
 # U3ltYW50ZWMgQ29ycG9yYXRpb24xMDAuBgNVBAMTJ1N5bWFudGVjIFRpbWUgU3Rh
 # bXBpbmcgU2VydmljZXMgQ0EgLSBHMgIQDs/0OMj+vzVuBNhqmBsaUDAJBgUrDgMC
 # GgUAoF0wGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcN
-# MTkwMjE4MjEwODE2WjAjBgkqhkiG9w0BCQQxFgQUCavHfaPdLA7EXvsAwMl/1pF4
-# xVowDQYJKoZIhvcNAQEBBQAEggEAYh6bHZIYAQZ9YlwqOmEsd5wd6ZHzeiUOVfjL
-# 3LMP9XW0Ug+XG+CWPnqVevGxlZfd376Y8hpmqy/Zb70HZQDCorwtYp7S3EEs1pZS
-# RvN5NnxNf7aXesa64bS6yJw1LCiQp6rG8GChFLx4sehGP5VwyR87X5Q/uXfbWpid
-# NJE1/uVY9pqXXHerQkXBMCpgXw4V66Y7r6D5hE7ybk38JmE6CPvAUr2+X4fvGAzm
-# s5eTkp/o0b4KMkhTfpXATYF9ZyoGqFh5IUW+h4vLvH364is0sF/sUDXxbs7J1NTC
-# bIhxK+5jb6vaGDESCDrrxOEvlfujLqzk63Fe+AKfB3H0Lra9aw==
+# MTkwMzEyMDkxNjQxWjAjBgkqhkiG9w0BCQQxFgQUAJ9N+KGDSPnpsosjWtd95RBP
+# JyAwDQYJKoZIhvcNAQEBBQAEggEAHfeJwdqijD9UL34/srAJXT+vG0fCsoTV4gZ0
+# +Ta85UmLjWhFyomaQ0Wof7+/KrROnFuj3g5TzH0T9655n55pCJyD3fWu0siUds7D
+# 6s9Zm+AolNCIDC4ZKUjSTknvZKSMregnDJgBfASGXLbVlqxjcPiIaN2mq72p+QH+
+# AzPuVj52teoAUb1jiDpySWBuQSsu6Njn2jQO9aG6xmEiHr9q781k2/Kp5hI2fZFq
+# E9OSMbQe6Yny2ewppsacNmkUPTSKF0j8+Q9i7RZKVxtnkfUtcCE8X2q28cCD3ohS
+# /LJAUxIiuAQKtHwCoOE7zBs7h6AycApCJhU8/jBhwC9bdg3xhw==
 # SIG # End signature block

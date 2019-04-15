@@ -1,58 +1,28 @@
-#Requires -Modules WebAdministration
-
-#Set-StrictMode -Version 2.0
-
-Function Invoke-ManageCommerceServiceTask {
+Function Invoke-EnsureLocalUserTask {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('Remove-Website', 'Remove-WebAppPool', 'Remove-Item')]
-        [string]$Action,
-        [Parameter(Mandatory = $false)]
-        [string]$PhysicalPath,
-        [Parameter(Mandatory = $false)]
-        [string]$AppPoolName = $Name,
-        [Parameter(Mandatory = $false)]
-        [string]$Port,
-        [Parameter(Mandatory = $false)]
-        [System.Security.Cryptography.X509Certificates.X509Certificate2] $Signer
+        [Parameter(Mandatory=$true)]
+        [string]$UserDomain,
+        [Parameter(Mandatory=$true)]
+        [string]$UserName,
+        [Parameter(Mandatory=$true)]
+        [string]$UserPassword
     )
 
-    Write-Information -MessageData "Manage Commerce Service $Name, Action $Action" -InformationAction 'Continue'
+    # Local user
 
     try {
-        if ($PSCmdlet.ShouldProcess($Name, $Action)) {
-            switch ($Action) {
-                'Remove-Website' {
-                    if (Get-Website($Name)) {
-                        Write-Host "Removing Website '$Name'"
-                        Remove-Website -Name $Name
-                    }
-                }
-                'Remove-WebAppPool' {
-                    if (Test-Path "IIS:\AppPools\$Name") {
-                        if ((Get-WebAppPoolState $Name).Value -eq "Started") {
-                            Write-Host "Stopping '$Name' application pool"
-                            Stop-WebAppPool -Name $Name
-                        }
-                        Write-Host "Removing '$Name' application pool"
-                        Remove-WebAppPool -Name $Name
-                    }
-                }
-                'Remove-Item' {
-                    if (Test-Path $PhysicalPath) {
-                        Write-Host "Attempting to delete site directory '$PhysicalPath'"
-                        Remove-Item $PhysicalPath -Recurse -Force
-                        Write-Host "'$PhysicalPath' deleted" -ForegroundColor Green
-                        dev_reset_iis_sql
-                    }
-                    else {
-                        Write-Warning "'$PhysicalPath' does not exist, no need to delete"
-                    }
-                }
-            }
+        $objComputer = [ADSI]("WinNT://$UserDomain, computer");
+        $colUsers = ($objComputer.psbase.children |
+        Where-Object {$_.psBase.schemaClassName -eq "User"} |
+        Select-Object -expand Name)
+
+        if ($colUsers -contains $UserName) {
+            Write-Host "The user account exists.";
+        }
+        else {
+            Write-Host "The user account does not exist ... creating user '$UserName'.";
+            NewLocalUser -UserName $UserName -Password $UserPassword
         }
     }
     catch {
@@ -60,107 +30,49 @@ Function Invoke-ManageCommerceServiceTask {
     }
 }
 
-Function Invoke-UpdateIdentityServerThumbprintTask {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Thumbprint,
-        [Parameter(Mandatory = $true)]
-        [string]$IDServerPath
-    )
+Register-SitecoreInstallExtension -Command Invoke-EnsureLocalUserTask -As EnsureLocalUser -Type Task -Force
 
-    Write-Host "Updating thumbprint in config file"
-    $pathToJson = $(Join-Path -Path $IDServerPath -ChildPath "wwwroot\appsettings.json")
-    $originalJson = Get-Content $pathToJson -Raw | ConvertFrom-Json
-    $settingsNode = $originalJson.AppSettings
-    $settingsNode.IDServerCertificateThumbprint = $thumbprint
-    $originalJson | ConvertTo-Json -Depth 100 -Compress | set-content $pathToJson
+function NewLocalUser
+{
+      PARAM
+      (
+        [String]$UserName=$(throw 'Parameter -UserName is missing!'),
+        [String]$Password=$(throw 'Parameter -Password is missing!')
+      )
+      Trap
+      {
+        Write-Host "Error: $($_.Exception.GetType().FullName)" -ForegroundColor Red ;
+        Write-Host $_.Exception.Message;
+        Write-Host $_.Exception.StackTrack;
+        break;
+      }
+
+      Write-Host "Creating $($UserName)";
+
+      #$response = Invoke-Expression -Command "NET USER $($UserName) `"/add`" $($Password) `"/passwordchg:no`" `"/expires:never`"";
+
+      $objOu = [ADSI]"WinNT://$env:COMPUTERNAME";
+      $objUser = $objOU.Create("User", $UserName);
+
+      $objUser.setpassword($Password);
+      $objUser.SetInfo();
+
+      $objUser.description = "$UserName";
+      $objUser.SetInfo();
+
+      $objUser.UserFlags.value = $objUser.UserFlags.value -bor 64;
+      $objUser.UserFlags.value = $objUser.UserFlags.value -bor 65536;
+      $objUser.SetInfo();
+
+      Write-Host "Response from creating local user: $response";
 }
 
-function Invoke-SetPermissionsTask {
-    [CmdletBinding(SupportsShouldProcess=$true)]
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateScript({Test-Path $_ })]
-        [string]$Path,
-        [psobject[]]$Rights
-    )
 
-    <#
-        Rights should contains
-        @{
-            User
-            FileSystemRights
-            AccessControlType
-
-            InheritanceFlags
-            PropagationFlags
-        }
-    #>
-
-    if(!$WhatIfPreference) {
-        Get-Acl -Path $Path | Set-Acl -Path $Path
-    }
-
-    $acl = Get-Acl -Path $Path
-
-    foreach($entry in $Rights){
-        $user = $entry.User
-        $permissions = $entry.FileSystemRights
-        $control = 'Allow'
-        if($entry['AccessControlType']) { $control = $entry.AccessControlType }
-        $inherit = 'ContainerInherit','ObjectInherit'
-        if($entry['InheritanceFlags']) { $inherit = $entry.InheritanceFlags }
-        $prop = 'None'
-        if($entry['PropagationFlags']) { $prop = $entry.PropagationFlags }
-
-        Write-Information -MessageData "Set Permissions $permissions for $user to path $path, $control" -InformationAction 'Continue'
-
-        if($PSCmdlet.ShouldProcess($Path, "Setting permissions")) {
-            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, $permissions, $inherit, $prop, $control)
-            $acl.SetAccessRule($rule)
-
-            Write-Verbose "$control '$permissions' for user '$user' on '$path'"
-            Write-Verbose "Permission inheritance: $inherit"
-            Write-Verbose "Propagation: $prop"
-            Set-Acl -Path $Path -AclObject $acl
-            Write-Verbose "Permissions set"
-        }
-    }
-}
-
-Register-SitecoreInstallExtension -Command Invoke-ManageCommerceServiceTask -As ManageCommerceService -Type Task -Force
-Register-SitecoreInstallExtension -Command Invoke-UpdateIdentityServerThumbprintTask -As UpdateIdentityServerThumbprint -Type Task -Force
-Register-SitecoreInstallExtension -Command Invoke-SetPermissionsTask -As SetPermissions -Type Task -Force
-
-function dev_reset_iis_sql {
-    try {
-        Write-Host "Restarting IIS"
-        iisreset -stop
-        iisreset -start
-    }
-    catch {
-        Write-Host "Something went wrong restarting IIS again"
-        iisreset -stop
-        iisreset -start
-    }
-
-    $mssqlService = Get-Service *SQL* | Where-Object {$_.Status -eq 'Running' -and $_.DisplayName -like 'SQL Server (*'} | Select-Object -First 1 -ExpandProperty Name
-
-    try {
-        Write-Host "Restarting SQL Server"
-        restart-service -force $mssqlService
-    }
-    catch {
-        Write-Host "Something went wrong restarting SQL server again"
-        restart-service -force $mssqlService
-    }
-}
 # SIG # Begin signature block
 # MIIXwQYJKoZIhvcNAQcCoIIXsjCCF64CAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUlMc8GeoRNe8F2uMMleAku2E3
-# yVCgghL8MIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUahsApAx0eisEmXBWe+TWk1v0
+# vBqgghL8MIID7jCCA1egAwIBAgIQfpPr+3zGTlnqS5p31Ab8OzANBgkqhkiG9w0B
 # AQUFADCBizELMAkGA1UEBhMCWkExFTATBgNVBAgTDFdlc3Rlcm4gQ2FwZTEUMBIG
 # A1UEBxMLRHVyYmFudmlsbGUxDzANBgNVBAoTBlRoYXd0ZTEdMBsGA1UECxMUVGhh
 # d3RlIENlcnRpZmljYXRpb24xHzAdBgNVBAMTFlRoYXd0ZSBUaW1lc3RhbXBpbmcg
@@ -266,22 +178,22 @@ function dev_reset_iis_sql {
 # bTExMC8GA1UEAxMoRGlnaUNlcnQgU0hBMiBBc3N1cmVkIElEIENvZGUgU2lnbmlu
 # ZyBDQQIQB6Zc7QsNL9EyTYMCYZHvVTAJBgUrDgMCGgUAoHAwEAYKKwYBBAGCNwIB
 # DDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEO
-# MAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFKTUtO1KWb4ghh2uWArqv2QG
-# ek9NMA0GCSqGSIb3DQEBAQUABIIBALL/t+VHavuAL4tWALU/htHH5HVbzFof0gGY
-# 2vP8IZv7rWKVSanL5AxcUyMBtZbL4182Cc7Y45BsC7eLsupo+YNJ8WEHsBJahQ38
-# 1udKxCw/Z6Xbn/kpyymk01lWaSvrChiD2xZpJ8eAnN/3bzc4Cy1lU7aISyVvhFBQ
-# oaXg619EoR4Ugmzj3Q3MaU4cShqG5nyjGl1d30XXMnRBZprd/JxDZUEMppQI/2s9
-# 54GJ+xONmi10R5XTqR8AXF6rnIRyAX5qcBeZ9Mlhv5FbLmFwJsU4lZSj61SlVJ2N
-# k9TLt7M3nEjfgPBk/2BXWUZ4O2ktxNbTAw1WFbaigXqPxg+kLUWhggILMIICBwYJ
+# MAwGCisGAQQBgjcCARUwIwYJKoZIhvcNAQkEMRYEFHWNTGqWZFFC0BuOxqKENWVb
+# TmObMA0GCSqGSIb3DQEBAQUABIIBACZjvamxDKQH1au+Aj911F2KM2FiqxDr8sxA
+# jCyFMXfJpGervLVXCJA0dxmScQ4D8hxv64Wt6CvkpdypLiWNM/qjqmsVZVUE8xHr
+# qm586WYdQHLXacmFwUHWaP8jtEGFFyGPZqIpztSCuee9I5dT9icUrEuuVlSrMZxP
+# Dkw+w3mE6BzYwkavWRkRfsCVBWRGHk1Aczm5kiRyY3JKQ60Mb+670JPGzetlcL+n
+# P6x0YHv0lRUeTHXZBx3LN7gNrx+y1VWbtfdceVG3co/Pc8vhIQDmYrkzWbXFpFiQ
+# B3btUR22zH07IHkVVek/2V61qIgXl/+hjJXFuHsmPCgCJ4kTgg6hggILMIICBwYJ
 # KoZIhvcNAQkGMYIB+DCCAfQCAQEwcjBeMQswCQYDVQQGEwJVUzEdMBsGA1UEChMU
 # U3ltYW50ZWMgQ29ycG9yYXRpb24xMDAuBgNVBAMTJ1N5bWFudGVjIFRpbWUgU3Rh
 # bXBpbmcgU2VydmljZXMgQ0EgLSBHMgIQDs/0OMj+vzVuBNhqmBsaUDAJBgUrDgMC
 # GgUAoF0wGAYJKoZIhvcNAQkDMQsGCSqGSIb3DQEHATAcBgkqhkiG9w0BCQUxDxcN
-# MTkwMjE4MjEwODE2WjAjBgkqhkiG9w0BCQQxFgQUCavHfaPdLA7EXvsAwMl/1pF4
-# xVowDQYJKoZIhvcNAQEBBQAEggEAYh6bHZIYAQZ9YlwqOmEsd5wd6ZHzeiUOVfjL
-# 3LMP9XW0Ug+XG+CWPnqVevGxlZfd376Y8hpmqy/Zb70HZQDCorwtYp7S3EEs1pZS
-# RvN5NnxNf7aXesa64bS6yJw1LCiQp6rG8GChFLx4sehGP5VwyR87X5Q/uXfbWpid
-# NJE1/uVY9pqXXHerQkXBMCpgXw4V66Y7r6D5hE7ybk38JmE6CPvAUr2+X4fvGAzm
-# s5eTkp/o0b4KMkhTfpXATYF9ZyoGqFh5IUW+h4vLvH364is0sF/sUDXxbs7J1NTC
-# bIhxK+5jb6vaGDESCDrrxOEvlfujLqzk63Fe+AKfB3H0Lra9aw==
+# MTkwMjE4MjEwODI4WjAjBgkqhkiG9w0BCQQxFgQUq0KAdYA4ZFHawsos+ch1uQrn
+# iFgwDQYJKoZIhvcNAQEBBQAEggEAdVzpWkbqMJPH/bpnzrSizWc6+9QzFiv5S+3i
+# Isxy8wnq8rO6APRd5HGT7mO82Yy0fY1Z+Mo9QWiBN1/fGCaTr1TCdjzJ5JxoXRwv
+# nPSTA8gydSZOKLVbk9vbKVu40KJfbb2QwFX+yROGHIWWUZ+SpaAbCf+IACV3Tkk+
+# oTU0KeBUaHsvSn0TAnhKCvqTzNsAiwRUeUPVaTF7+SQNMtSqP0fJzTDmPntu8/yx
+# Ikct4Db+EnfwuDyqWYQfX/bCkb/uPt8gCHQ9Gbv10doNqDadQa9ULZK5EG7Fha5q
+# g8t1sszbGQa0yBVvPQDHFj331JcyOZTAlaaw4CriYD0pmwWrGA==
 # SIG # End signature block
