@@ -17,6 +17,14 @@
     "StorefrontHostName": {
       "Type": "string",
       "Description": "The host name of the storefront."
+    },
+    "InstallDir": {
+      "Type": "string",
+      "Description": "The sitecore site content path."
+    },
+    "SiteUtilitiesSrc": {
+      "Type": "string",
+      "Description": "Site Utilities source path"
     }
   },
   "Variables": {
@@ -26,8 +34,12 @@
     "Root.Cert.Store": "cert:\\LocalMachine\\Root",
     // The certificate store for the client certificate.
     "Client.Cert.Store": "cert:\\LocalMachine\\My",
-    "Security.SSL.CertificateThumbprint": "[GetCertificateThumbprint(parameter('StorefrontHostName'), variable('Client.Cert.Store'))]"
+    "Security.SSL.CertificateThumbprint": "[GetCertificateThumbprint(parameter('StorefrontHostName'), variable('Client.Cert.Store'))]",
+    "ContentSearchConfig": "[concat(parameter('InstallDir'), '\\App_Config\\Sitecore\\ContentSearch\\Sitecore.ContentSearch.config')]",
+    "ContentSearchEnabledXpath": "//configuration/sitecore/settings/setting[@name='ContentSearch.Enabled']",
+    "MarketingConfigDir": "[concat(parameter('InstallDir'), '\\App_Config\\Sitecore\\Marketing.Operations.xMgmt')]"
   },
+  "Modules": [ "SitecoreUtilityTasks" ],
   "Tasks": {
     "CreatePaths": {
       // Create the physical disk path.
@@ -65,8 +77,8 @@
         "Action": "Stop"
       }
     },
-    "RemoveDefaultBinding": {
-      "Description": "Removes the default *:80 web binding.",
+    "CreateBindingsWithThumprint": {
+      "Description": "Creates SSL binding, removes the default *:80 web binding.",
       "Type": "WebBinding",
       "Params": {
         "SiteName": "[parameter('SiteName')]",
@@ -75,30 +87,14 @@
             "Port": "80",
             "IPAddress": "*"
           }
-        ]
-      }
-    },
-    "CreateBindingsWithThumprint": {
-      // Configures the site bindings for the website.
-      "Type": "WebBinding",
-      "Params": {
-        "SiteName": "[parameter('SiteName')]",
+        ],
         "Add": [
           {
             "HostHeader": "[parameter('StorefrontHostName')]",
             "Protocol": "https",
             "SSLFlags": 1,
             "Thumbprint": "[variable('Security.SSL.CertificateThumbprint')]"
-          }
-        ]
-      }
-    },
-    "CreateBindings": {
-      // Configures the site bindings for the website.
-      "Type": "WebBinding",
-      "Params": {
-        "SiteName": "[parameter('SiteName')]",
-        "Add": [
+          },
           {
             "HostHeader": "[parameter('StorefrontHostName')]",
             "Protocol": "http",
@@ -128,6 +124,34 @@
       "Params": {
         "Name": "[parameter('SiteName')]",
         "Action": "Start"
+      }
+    },
+    "CopySiteUtilityFolder": {
+      "Type": "Copy",
+      "Params": {
+        "Source": "[parameter('SiteUtilitiesSrc')]",
+        "Destination": "[parameter('InstallDir')]"
+      }
+    },
+    "DisableIndexUpdate": {
+      // Speed up deployment
+      "Type": "SetXml",
+      "Params": [
+        {
+          "FilePath": "[variable('ContentSearchConfig'))]",
+          "Xpath": "[variable('ContentSearchEnabledXpath')]",
+          "Attributes": {
+            "value": "false"
+          }
+        }
+      ]
+    },
+    "DisableConfigFiles": {
+      // Speed up deployment
+      "Type": "DisableConfigFiles",
+      "Params": {
+        "ConfigDir": "[variable('MarketingConfigDir')]",
+        "ConfigFileList": [ "Sitecore.Marketing.Search.config" ]
       }
     }
   }
