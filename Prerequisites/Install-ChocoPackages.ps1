@@ -17,7 +17,6 @@ function InstallOrUpdateChocoPackages {
     #     ('vscode', ''),
     #     ('vscode-powershell', ''),
     #     ('vscode-csharp', ''),
-    #     ('jre8', ''),
     #     #('urlrewrite', ''), #installed inside '\Install-IIS.ps1'
     #     ('snaketail', '')
     # )
